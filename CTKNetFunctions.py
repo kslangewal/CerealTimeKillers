@@ -21,6 +21,7 @@ from scipy.signal import spectrogram
 
 # Plot packages
 from tqdm.notebook import tqdm
+from matplotlib.colors import hsv_to_rgb
 import matplotlib.pyplot as plt
 get_ipython().run_line_magic('matplotlib', 'inline')
 
@@ -117,8 +118,107 @@ def plot_loss_accuracy(train_loss, val_loss, test_loss, train_acc, val_acc, test
     
     fig.set_size_inches(15.5, 5.5)
     plt.show()
-    
 
+    
+def vector_to_rgb(angle, absolute, maxl):
+    angle = angle % (2 * np.pi)
+    if angle < 0:
+        angle += 2 * np.pi
+    return hsv_to_rgb((angle / 2 / np.pi, absolute / maxl, absolute / maxl))
+
+
+# Plot 2D emotions in a plane for all dataset
+def TwoD_emotion_plotting(args, model, dataset, lrange, subject, game, plot_disk = False):
+    
+    l, r, m = lrange[0], lrange[1], (lrange[0] + lrange[1]) / 2.0
+    maxlen = np.sqrt(np.square(l - m) + np.square(r - m))
+    
+    # Plot color wheel for 2D emotions
+    if plot_disk:
+        fig = plt.figure()
+        ax = fig.add_axes([0.1, 0.1, 0.8, 0.8], projection = 'polar')
+        n = 200
+        t1 = np.linspace(0, 2 * np.pi, n)
+        t2 = np.linspace(0, maxlen, n)
+        rg, tg = np.meshgrid(t2, t1)
+        c = np.array(list(map(vector_to_rgb, tg.T.flatten(), rg.T.flatten(), [maxlen] * len(tg.T.flatten()))))
+        cv = c.reshape((n, n, 3))
+        mp = ax.pcolormesh(t1, t2, cv[:,:,1], color = c, shading = 'auto')
+        mp.set_array(None)
+        ax.set_axis_off()
+        plt.plot([0] * len(t2), t2, color = 'k')
+        plt.plot([np.pi / 2] * len(t2), t2, color = 'k')
+        plt.plot([np.pi] * len(t2), t2, color = 'k')
+        plt.plot([-np.pi / 2] * len(t2), t2, color = 'k')
+        plt.show()
+    
+    # Plot 2D emotions for each dara
+    fig, ax = plt.subplots(nrows = subject, ncols = game)
+    axes = ax.flatten()
+                     
+    model.eval()
+
+    with torch.no_grad():
+        for idx, (data, target, quadrant) in enumerate(dataset):
+            data = data.type(torch.float).unsqueeze(0).to(args['device'])
+            target = target.type(torch.float).unsqueeze(0).to(args['device'])
+            quadrant = quadrant.type(torch.float).unsqueeze(0).to(args['device'])
+            output = model(data)
+        
+            predicted = emotion_transformation(output)
+            flabels = maximum_extraction(quadrant)
+            labels = emotion_transformation(target)
+            
+            ans = output[0].detach().numpy()
+            ans = ans * (lrange[1] - lrange[0]) + lrange[0]
+            real = target[0].detach().numpy()
+            real = real * (lrange[1] - lrange[0]) + lrange[0]
+            
+            x_start, x_end = [l, m], [r, m] # valence axis
+            y_start, y_end = [m, l], [m, r] # arousal axis 
+            z_start, z_end = [m, m], ans # predicted 2D emotion
+            r_start, r_end = [m, m], real # self-reported 2D emotion
+            
+            x = [x_start[0], y_start[0]]
+            y = [x_start[1], y_start[1]]
+            u = [x_end[0] - x_start[0], y_end[0] - y_start[0]]
+            v = [x_end[1] - x_start[1], y_end[1] - y_start[1]]
+            a = axes[idx].quiver(x, y, u, v, color = 'k', 
+                                 width = 0.01, angles = 'xy', scale_units = 'xy', scale = 1)
+            
+            x = [r_start[0]]
+            y = [r_start[1]]
+            u = [r_end[0] - r_start[0]]
+            v = [r_end[1] - r_start[1]]
+            lengths = np.sqrt(np.square(u) + np.square(v))
+            a = axes[idx].quiver(x, y, u, v, color = 'grey',
+                                 width = 0.015, angles = 'xy', scale_units = 'xy', scale = 1)
+            # axes[idx].text(r_end[0], r_end[1], f'r: (' + str(int(round(r_end[0]))) + ',' + str(int(round(r_end[1]))) + ')')
+            
+            x = [z_start[0]]
+            y = [z_start[1]]
+            u = [z_end[0] - z_start[0]]
+            v = [z_end[1] - z_start[1]]
+            angles = np.arctan2(v, u)
+            lengths = np.sqrt(np.square(u) + np.square(v))
+            a = axes[idx].quiver(x, y, u, v, color = np.array(list(map(vector_to_rgb, angles.flatten(), lengths.flatten(), [maxlen]))),
+                                 width = 0.025, angles = 'xy', scale_units = 'xy', scale = 1)
+            # axes[idx].text(z_end[0], z_end[1], f'p: (' + str(round(z_end[0], 2)) + ',' + str(round(z_end[1], 2)) + ')')
+            
+            axes[idx].set_xlim(lrange)
+            axes[idx].set_ylim(lrange)
+            axes[idx].text(m, r - 0.5, 'A')
+            axes[idx].text(r - 0.5, m, 'V')
+            axes[idx].axis('off')
+            title = f'S' + str(int(idx / game) + 1) + 'G' + str(idx % game + 1)
+            if maximum_comparison(predicted, labels):
+                axes[idx].set_title(title)
+            else:
+                axes[idx].set_title(title, color = 'r', fontweight = 'bold')
+        
+    fig.set_size_inches(8, 54)
+    plt.show()
+    
 
 # In[5]:
 
@@ -445,7 +545,7 @@ def train(args, model, train_loader, optimizer = None, criterion = nn.MSELoss())
 # In[12]:
 
 
-def test(args, label, model, test_loader, is_2D = False, criterion = nn.MSELoss()):
+def test(args, model, test_loader, is_2D = False, criterion = nn.MSELoss()):
     
     model.eval()
     
@@ -466,9 +566,9 @@ def test(args, label, model, test_loader, is_2D = False, criterion = nn.MSELoss(
                 predicted = maximum_extraction(output)
                 labels = maximum_extraction(target)
             else:
-                predicted = emotion_transformation(output, label)
+                predicted = emotion_transformation(output)
                 # labels = maximum_extraction(quadrant)
-                labels = emotion_transformation(target, label)
+                labels = emotion_transformation(target)
             acc += maximum_comparison(predicted, labels)
             total += target.size(0)
             
@@ -479,7 +579,7 @@ def test(args, label, model, test_loader, is_2D = False, criterion = nn.MSELoss(
 
 
 def simulation(args, label, model, train_loader, val_loader, test_loader, is_2D = False,
-               optimizer = None, criterion = nn.MSELoss()):
+               optimizer = None, criterion = nn.MSELoss(), epoch_start = 30):
     
     model = model.to(args['device'])
     
@@ -492,17 +592,19 @@ def simulation(args, label, model, train_loader, val_loader, test_loader, is_2D 
         train(args, model, train_loader, optimizer = optimizer, criterion = criterion)
         param_norm = calculate_frobenius_norm(model)
         
-        train_loss, train_acc = test(args, label, model, train_loader, is_2D = is_2D, criterion = criterion)
-        val_loss, val_acc = test(args, label, model, val_loader, is_2D = is_2D, criterion = criterion)
-        test_loss, test_acc = test(args, label, model, test_loader, is_2D = is_2D, criterion = criterion)
+        train_loss, train_acc = test(args, model, train_loader, is_2D = is_2D, criterion = criterion)
+        val_loss, val_acc = test(args, model, val_loader, is_2D = is_2D, criterion = criterion)
+        test_loss, test_acc = test(args, model, test_loader, is_2D = is_2D, criterion = criterion)
         
-        if (val_loss < best_loss) or (epoch == 0):
+        if (val_loss < best_loss) and (epoch >= epoch_start):
             best_loss = val_loss
             best_epoch = epoch
             best_model = copy.deepcopy(model)
             wait = 0
-        else:
+        elif epoch >= epoch_start:
             wait += 1
+        else:
+            wait = 0
         
         train_loss_list.append(train_loss)
         val_loss_list.append(val_loss)
@@ -533,7 +635,7 @@ def simulation(args, label, model, train_loader, val_loader, test_loader, is_2D 
 
 
 # 2D emotions ['valence', 'arousal'] to 4 quadrant emotions ['boring', 'horrible', 'calm', 'funny']
-def emotion_transformation(pred, label, c = 0.5):
+def emotion_transformation(pred, c = 0.5):
     # Quadrant I:   ('valence' >= c, 'arousal' >= c) --> 'funny' 
     # Quadrant II:  ('valence' >= c, 'arousal' <= c) --> 'calm'
     # Quadrant III: ('valence' <= c, 'arousal' <= c) --> 'boring'
